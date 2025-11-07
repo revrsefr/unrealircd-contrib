@@ -4,6 +4,8 @@
  * 
  * Restricts channels to registered users
  * Requested by Chris[A]
+ *
+ * Deprecated: Exists in source with more options, see restrict-commands:channel-create
  * 
 */
 /*** <<<MODULE MANAGER START>>>
@@ -12,7 +14,7 @@ module
 		documentation "https://github.com/ValwareIRC/valware-unrealircd-mods/blob/main/restrict-chans/README.md";
 		troubleshooting "In case of problems, documentation or e-mail me at v.a.pond@outlook.com";
 		min-unrealircd-version "6.*";
-		max-unrealircd-version "6.*";
+		max-unrealircd-version "6.1.6";
 		post-install-text {
 				"The module is installed. Now all you need to do is add a loadmodule line:";
 				"loadmodule \"third/restrict-chans\";";
@@ -28,7 +30,7 @@ int isreg_check_join(Client *client, Channel *channel, const char *key, char **e
 ModuleHeader MOD_HEADER =
 {
 	"third/restrict-chans",
-	"1.2",
+	"1.3",
 	"Restrict channel creation to logged-in users",
 	"Valware",
 	"unrealircd-6",
@@ -58,6 +60,10 @@ MOD_TEST()
 
 int isreg_check_join(Client *client, Channel *channel, const char *key, char **errmsg)
 {
+	Client *serv_server;
+	if (!(serv_server = find_server(SASL_SERVER, NULL)) || !(serv_server = find_server(SERVICES_NAME, NULL)))
+		return HOOK_CONTINUE;
+
 	if (has_channel_mode(channel, 'P')) // it's permanent, continue;
 		return HOOK_CONTINUE;
 	if (channel->users == 0)
@@ -74,6 +80,10 @@ int isreg_check_join(Client *client, Channel *channel, const char *key, char **e
 
 int isreg_can_join(Client *client, Channel *channel, const char *key)
 {
+	Client *serv_server;
+	if (!(serv_server = find_server(SASL_SERVER, NULL)) || !(serv_server = find_server(SERVICES_NAME, NULL)))
+		return HOOK_CONTINUE;
+	
 	if (has_channel_mode(channel, 'P')) // it's permanent, continue;
 		return HOOK_CONTINUE;
 	/* allow people to join permanent empty channels and allow opers to create new channels */

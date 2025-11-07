@@ -36,6 +36,12 @@ module {
 		} \
 	} while(0)
 
+#if UNREAL_VERSION >= 0x06020000
+	#define CallCommandOverrideCompatU06020000(_parc, _parv) (CallCommandOverride(ovr, clictx, client, recv_mtags, _parc, _parv))
+#else
+	#define CallCommandOverrideCompatU06020000(_parc, _parv) (CallCommandOverride(ovr, client, recv_mtags, _parc, _parv))
+#endif
+
 // Quality fowod declarations
 int bancheck_configtest(ConfigFile *cf, ConfigEntry *ce, int type, int *errs);
 int bancheck_configrun(ConfigFile *cf, ConfigEntry *ce, int type);
@@ -47,7 +53,7 @@ int showNotif = 0; // Display message in case of denied masks
 // Dat dere module header
 ModuleHeader MOD_HEADER = {
 	"third/bancheck_access", // Module name
-	"2.1.2", // Version
+	"2.1.4", // Version
 	"Prevents people who have +o or higher from getting banned, unless done by people with +a/+q or opers", // Description
 	"Gottem", // Author
 	"unrealircd-6", // Modversion
@@ -133,9 +139,10 @@ int bancheck_rehash(void) {
 
 // Now for the actual override
 CMD_OVERRIDE_FUNC(bancheck_override) {
-	// Gets args: CommandOverride *ovr, Client *client, MessageTag *recv_mtags, int parc, char *parv[]
+	// Gets args: CommandOverride *ovr, ClientContext *clictx, Client *client, MessageTag *recv_mtags, int parc, const char *parv[]
 	Channel *channel; // Channel pointer
 	Client *acptr; // Ban target
+	Member *memb = NULL; // Channel members thingy =]
 	int fc, mc, cc; // Flag count, mask count and char count respectively
 	int i, j; // Just s0em iterators fam
 	int stripped; // Count 'em
@@ -147,20 +154,26 @@ CMD_OVERRIDE_FUNC(bancheck_override) {
 	char c; // Current flag lol, can be '+', '-' or any letturchar
 	char curdir; // Current direction (add/del etc)
 	const char *tmpmask; // Store "cleaned" ban mask
-	char *banmask; // Have to store it agen so it doesn't get fukt lol (sheeeeeit)
 	char umask[NICKLEN + USERLEN + HOSTLEN + 24], realumask[NICKLEN + USERLEN + HOSTLEN + 24]; // Full nick!ident@host masks for users yo
 	Cmode *chanmode;
 	int chanmode_max;
+	BanContext *ban_ctx;
 
 	// May not be anything to do =]
-	if(!MyUser(client) || IsOper(client) || parc < 3) {
-		CallCommandOverride(ovr, client, recv_mtags, parc, parv); // Run original function yo
+	if(parc < 3 || (!IsULine(client) && (!MyUser(client) || IsOper(client)))) {
+		CallCommandOverrideCompatU06020000(parc, parv); // Run original function yo
 		return;
 	}
 
 	// Need to be at least hops or higher on a channel for this to kicc in obv (or U-Line, to prevent bypassing this module with '/cs mode')
-	if(!(channel = find_channel(parv[1])) || !(check_channel_access(client, channel, "hoaq") || IsULine(client))) {
-		CallCommandOverride(ovr, client, recv_mtags, parc, parv); // Run original function yo
+	if(!(channel = find_channel(parv[1])) || (!IsULine(client) && !check_channel_access(client, channel, "ho"))) {
+		CallCommandOverrideCompatU06020000(parc, parv);
+		return;
+	}
+
+	// Allow human +a/+q users anyway, but U-Lines will always be subject to restrictions because we have no way to tell who originally executed it
+	if(!IsULine(client) && check_channel_access(client, channel, "aq")) {
+		CallCommandOverrideCompatU06020000(parc, parv);
 		return;
 	}
 
@@ -178,7 +191,6 @@ CMD_OVERRIDE_FUNC(bancheck_override) {
 	// Loop over every mode flag
 	for(i = 0; i < strlen(parv[2]); i++) {
 		c = parv[2][i];
-		tmpmask = banmask = NULL; // Aye elemao
 		cont = 0;
 
 		// Check if we need to verify somethang
@@ -205,33 +217,37 @@ CMD_OVERRIDE_FUNC(bancheck_override) {
 				if(curdir != '+')
 					break;
 
-				// Turn "+b *" into "+b *!*@*" so we can easily check bel0w =]
-				tmpmask = clean_ban_mask(parv[j], (curdir == '-' ? MODE_DEL : MODE_ADD), client, 0);
+				// Ensure "+b *" is turned into shit like "+b *!*@*" so we can easily check bel0w =]
+				#if UNREAL_VERSION <= 0x06010700
+					tmpmask = clean_ban_mask(parv[j], MODE_ADD, client, 0);
+				#else
+					tmpmask = clean_ban_mask(parv[j], MODE_ADD, EXBTYPE_BAN, client, channel, 0);
+				#endif
+
 				if(!tmpmask)
 					break;
 
-				// Gotta dup that shit cuz clean_ban_mask() eventually calls make_nick_user_host() too, which fucks with the for loop below kek
-				// Could also do any str*cpy function but eh =]
-				banmask = strdup(tmpmask);
-
-				// Iter8 em
-				Member *memb = NULL; // Channel members thingy =]
+				ban_ctx = safe_alloc(sizeof(BanContext));
+				ban_ctx->channel = channel;
+				ban_ctx->ban_check_types = BANCHK_ALL;
+				ban_ctx->ban_type = EXBTYPE_BAN;
 				for(memb = channel->members; memb; memb = memb->next) {
-					acptr = memb->client; // Ban target
-					if(acptr) { // Sanity check lol
-						strlcpy(umask, make_nick_user_host(acptr->name, acptr->user->username, GetHost(acptr)), sizeof(umask)); // Get full nick!ident@host mask imo tbh (either vhost or uncloaked host)
-						strlcpy(realumask, make_nick_user_host(acptr->name, acptr->user->username, acptr->user->cloakedhost), sizeof(realumask)); // Get it with the cloaked host too
-						if(check_channel_access(acptr, channel, "oaq") && (match_simple(banmask, umask) || match_simple(banmask, realumask))) { // Check if banmask matches it for +o and highur
-							skip[j] = 1; // Skip it lol
-							newparc--; // Decrement parc so Unreal doesn't shit itself =]
-							cont = 1;
-							stripped++;
-						}
-					}
-					if(cont)
+					acptr = memb->client; // Potential ban target
+					if(!acptr || !check_channel_access(acptr, channel, "oaq"))
+						continue;
+
+					ban_ctx->client = acptr;
+					ban_ctx->banstr = tmpmask; // Need to reset this every time because it may be changed by below function call xd
+					if(ban_check_mask(ban_ctx)) {
+						skip[j] = 1; // Skip it lol
+						newparc--; // Decrement parc so Unreal doesn't shit itself =]
+						cont = 1;
+						stripped++;
 						break;
+					}
 				}
-				safe_free(banmask);
+
+				safe_free(ban_ctx);
 				break;
 
 			// Some other modes may have an argument t00
@@ -322,5 +338,5 @@ CMD_OVERRIDE_FUNC(bancheck_override) {
 		newparv[newparc] = NULL;
 	else
 		newparv[MAXPARA] = NULL;
-	CallCommandOverride(ovr, client, recv_mtags, newparc, newparv); // Run original function yo
+	CallCommandOverrideCompatU06020000(newparc, newparv);
 }
